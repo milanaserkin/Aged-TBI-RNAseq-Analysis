@@ -1,0 +1,341 @@
+---
+title: "Aged-TBI-RNAseq-Analysis"
+author: "Milana Serkin"
+format: html
+editor: visual
+---
+
+## DESeq2
+
+```{r knitr}
+knitr::opts_knit$set(root.dir ="/Users/milana/Desktop")
+```
+
+Loading all of the libraries
+
+```{r Loading Libraries}
+
+lst = c("dplyr", "ggplot2", "readr", "stringr", "RColorBrewer", "DESeq2", "EnhancedVolcano", "RColorBrewer", "pheatmap", "forestplot")
+
+load_libraries = function(list_of_packages){
+  for (i in lst) {
+    suppressPackageStartupMessages(library(i, character.only = TRUE))}
+}
+
+load_libraries(lst)
+```
+
+## Loading in the data: both counts and metatable
+
+```{r Loading in the data}
+
+library(tidyverse)
+
+#Reading in csv file
+#Data from: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE206932
+#Paper for comparison: https://elifesciences.org/articles/81154#content
+
+counts <- read_csv("GSE206932_merged.counts.bulk.csv", show_col_types = FALSE) 
+  colnames(counts)[1] <- "gene_id"
+  counts <- counts %>%
+  mutate(across(-gene_id, ~ as.integer(round(.x)))) %>%
+  column_to_rownames("gene_id")
+
+head(counts)
+
+#Confirm correct dimensions
+# 1. Check the exact number of rows and columns
+dim(counts) 
+# Expected output: [1] 55385    12
+# 2. Verify the column names (Should list your 12 sample names)
+colnames(counts)
+# 3. Peek at the bottom of the dataset to ensure it didn't cut off
+tail(counts)
+```
+
+```{r Making Metadata}
+#Make a metadata table for this dataset
+
+# 1. Extract sample IDs (excluding the first column)
+#sample_ids <- colnames(counts)[-1]
+#Changing this because gene_id = row names
+sample_ids <- colnames(counts)
+
+# 2. Parse sample IDs
+parsed_ids <- strsplit(sample_ids, "_") #not used
+
+metadata <- data.frame(
+  Sample = sample_ids,
+
+  # Condition 1 
+  Age = ifelse(substr(sample_ids, 1, 1) == "Y", "Young", "Aged"),
+
+  # Condition 2 
+  Condition = ifelse(substr(sample_ids, 2, 2) == "S", "Sham", "TBI"),
+  
+  #Condition 3 
+  Replicate = paste0("Rep_", substr(sample_ids, 3, 3))
+)
+
+# 4. Set columns to factors
+rownames(metadata) <- sample_ids
+metadata$Age <- factor(metadata$Age, levels = c("Young", "Aged"))
+metadata$Condition <- factor(metadata$Condition, levels = c("Sham", "TBI"))
+metadata$Replicate <- factor(metadata$Replicate)
+
+print(metadata)
+```
+
+## 
+
+## DESeq2 analysis
+
+```{r DESeq2 setup}
+get_dds_all = function(metadata,counts){
+  columnData <- metadata
+  
+  keep <- rowSums(counts) >= 10
+  countData <- counts[keep, ]
+  
+  dds <- DESeqDataSetFromMatrix(countData = countData, colData = metadata, design = ~ Age * Condition)
+
+  dds <- DESeq(dds)   
+  
+  return(dds)
+}
+
+print_deseqTable = function(dds){
+  res <- results(dds, contrast = c("Condition", "TBI", "Sham"))
+  outfile <- paste0("/Users/milana/Desktop/deseq-results2.txt")
+  write.table(res, file = outfile, sep = '\t', quote = FALSE, col.names = NA)
+  return(res)
+}
+```
+
+```{r DESeq2 analysis}
+
+#perform deseq
+dds_all = get_dds_all(metadata,counts)
+# Remove the "gene:" prefix from the "Gene" column
+rownames(dds_all) <- gsub("gene:", "", rownames(dds_all))
+
+deseq_normalized_counts <- as.data.frame(counts(dds_all, normalized = TRUE))
+
+deseq_normalized_counts$Gene_id <- row.names(deseq_normalized_counts)
+
+deseq_normalized_counts <- deseq_normalized_counts[, c(ncol(deseq_normalized_counts), 1:(ncol(deseq_normalized_counts)-1))]
+
+#write.table(deseq_normalized_counts, "/Users/milana/Desktop/deseq_norm_counts2.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+
+print_deseqTable(dds_all)
+```
+
+## PCA
+
+```{r PCA}
+get_pca = function(dds, title) {
+  
+  trans_data <- rlog(dds, blind = FALSE) 
+  
+  # Use DESeq2's built in PCA calculator
+  pca_data <- plotPCA(trans_data, intgroup = c("Age", "Condition"), returnData = TRUE)
+  
+  # Extract the percent variance calculated by DESeq2
+  percent_var <- round(100 * attr(pca_data, "percentVar"))
+  
+  # DESeq2 glues the variables together with a colon (:) 
+  custom_colors <- c("Young:Sham" = "#1B9E77", "Young:TBI" = "#bf60a5ff", 
+                     "Aged:Sham" = "#7570B3", "Aged:TBI" = "#377eb8")
+  
+  # Change color = c("Age", "Condition") to color = group
+  ggplot(pca_data, aes(x = PC1, y = PC2, color = group, label = name)) +
+    geom_point(size = 4, alpha = 0.8) +  
+    coord_fixed() +
+    scale_color_manual(values = custom_colors) +
+    labs(
+      title = title,
+      x = paste0("PC1: ", percent_var[1], "% variance"),
+      y = paste0("PC2: ", percent_var[2], "% variance"),
+      color = "Experimental Group" 
+    ) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face="bold"))
+}
+
+# Run it
+pca_plot = get_pca(dds_all, "PCA: 4 Experimental Groups")
+print(pca_plot)
+
+```
+
+```         
+```
+
+## Get DE genes and Volcanoes
+
+```{r DE genes and Volcanoes}
+library(DESeq2)
+library(ggplot2)
+
+padj_cutoff <- 0.1
+lfc_cutoff <- 0
+
+# 1. Function to run a fresh DESeq2 model on a subset of data
+run_pairwise_deseq <- function(meta_subset, counts_full, factor_name, target_lvl, ref_lvl) {
+  
+  # A. Subset the counts to match the metadata exactly
+  counts_sub <- counts_full[, rownames(meta_subset)]
+  
+  # B. Filter low counts ONLY within these 6 samples
+  keep <- rowSums(counts_sub) >= 10
+  counts_sub <- counts_sub[keep, ]
+  
+  # C. Set the reference level (Baseline)
+  meta_subset[[factor_name]] <- factor(meta_subset[[factor_name]], levels = c(ref_lvl, target_lvl))
+  
+  # D. Run a fresh DESeq2 model
+  dds <- DESeqDataSetFromMatrix(countData = counts_sub, colData = meta_subset, design = as.formula(paste0("~ ", factor_name)))
+  dds <- DESeq(dds)
+  
+  # E. Get results
+  res <- results(dds, contrast = c(factor_name, target_lvl, ref_lvl), alpha = padj_cutoff)
+  res_df <- as.data.frame(res)
+  res_df <- res_df[!is.na(res_df$padj), ] # Remove NAs
+  
+  # F. Print counts
+  up <- sum(res_df$padj < padj_cutoff & res_df$log2FoldChange > lfc_cutoff)
+  down <- sum(res_df$padj < padj_cutoff & res_df$log2FoldChange < -lfc_cutoff)
+  
+  print(paste("---", target_lvl, "vs", ref_lvl, "---"))
+  print(paste0("Up: ", up, " | Down: ", down))
+  
+  return(res_df)
+}
+
+# 2. Volcano Plot Function
+volcano_plot <- function(deg_results_df, plot_title) {
+  cols <- c("DOWN" = "blue", "NO" = "grey", "UP" = "red")
+  
+  plot_df <- deg_results_df
+  plot_df$diffexpressed <- "NO"
+  plot_df$diffexpressed[plot_df$log2FoldChange > lfc_cutoff & plot_df$padj < padj_cutoff] <- "UP"
+  plot_df$diffexpressed[plot_df$log2FoldChange < -lfc_cutoff & plot_df$padj < padj_cutoff] <- "DOWN"
+  
+  up_count <- sum(plot_df$diffexpressed == "UP")
+  down_count <- sum(plot_df$diffexpressed == "DOWN")
+
+  x_max <- max(abs(plot_df$log2FoldChange), na.rm = TRUE)
+  y_max <- max(-log10(plot_df$padj), na.rm = TRUE)
+
+  p <- ggplot(plot_df, aes(x = log2FoldChange, y = -log10(padj), col = diffexpressed)) +
+    geom_point(size = 1.2, alpha = 0.8) +
+    scale_color_manual(values = cols) +
+    geom_vline(xintercept = 0, col = "gray", linetype = 'dashed') +
+    geom_hline(yintercept = -log10(padj_cutoff), col = "black", linetype = 'dashed') +
+    annotate("text", x = -x_max, y = y_max, label = down_count, 
+             color = cols["DOWN"], fontface = "bold", hjust = 0, vjust = 1, size = 5) +
+    annotate("text", x = x_max, y = y_max, label = up_count, 
+             color = cols["UP"], fontface = "bold", hjust = 1, vjust = 1, size = 5) +
+    labs(title = plot_title, x = "log2 Fold Change", y = "-log10 FDR") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none")
+  
+  return(p)
+}
+```
+
+```{r Comparisons}
+
+# --- Comparison 1: Young Sham vs Young TBI ---
+# Target: 13 Up, 9 Down
+meta_young <- metadata[metadata$Age == "Young", ]
+res_young <- run_pairwise_deseq(meta_young, counts, factor_name = "Condition", target_lvl = "TBI", ref_lvl = "Sham")
+volc1 <- volcano_plot(res_young, "Young Sham vs Young TBI")
+print(volc1)
+
+# --- Comparison 2: Aged Sham vs Aged TBI ---
+# Target: 41 Up, 323 Down
+meta_aged <- metadata[metadata$Age == "Aged", ]
+res_aged <- run_pairwise_deseq(meta_aged, counts, factor_name = "Condition", target_lvl = "TBI", ref_lvl = "Sham")
+volc2 <- volcano_plot(res_aged, "Aged Sham vs Aged TBI")
+print(volc2)
+
+# --- Comparison 3: Young Sham vs Aged Sham ---
+# Target: 893 Up, 879 Down
+meta_sham <- metadata[metadata$Condition == "Sham", ]
+res_sham <- run_pairwise_deseq(meta_sham, counts, factor_name = "Age", target_lvl = "Aged", ref_lvl = "Young")
+volc3 <- volcano_plot(res_sham, "Young Sham vs Aged Sham")
+print(volc3)
+
+# --- Comparison 4: Young TBI vs Aged TBI ---
+# Target: 1239 Up, 1697 Down
+meta_tbi <- metadata[metadata$Condition == "TBI", ]
+res_tbi <- run_pairwise_deseq(meta_tbi, counts, factor_name = "Age", target_lvl = "Aged", ref_lvl = "Young")
+volc4 <- volcano_plot(res_tbi, "Young TBI vs Aged TBI")
+print(volc4)
+```
+
+```         
+```
+
+# Pathway Analysis
+
+```{r pathway analysis}
+
+# PATHWAY ANALYSIS (GAGE & PATHVIEW)
+
+
+# 1. Load the libraries
+library(gage)
+library(gageData)
+library(pathview)
+library(org.Mm.eg.db) # Mouse database for gene ID conversion
+
+# 2. Prepare the Fold Changes
+
+foldchanges <- res_aged$log2FoldChange
+names(foldchanges) <- rownames(res_aged)
+
+# 3. Convert Gene Symbols to Entrez IDs
+# Pathview needs numeric Entrez IDs (e.g., 14085) instead of symbols (e.g., "Gpx6")
+entrez_ids <- mapIds(org.Mm.eg.db,
+                     keys = names(foldchanges),
+                     column = "ENTREZID",
+                     keytype = "SYMBOL",
+                     multiVals = "first")
+
+# Replace the symbols with Entrez IDs
+names(foldchanges) <- entrez_ids
+
+# Remove any genes that didn't successfully map to an Entrez ID to prevent errors
+foldchanges <- foldchanges[!is.na(names(foldchanges))]
+
+# 4. Load the Mouse KEGG Pathway Database
+data(kegg.sets.mm)
+data(sigmet.idx.mm)
+kegg.sets.mm <- kegg.sets.mm[sigmet.idx.mm]
+
+# 5. Run the GAGE Pathway Analysis
+# This checks if your specific fold changes significantly alter known biological pathways
+keggres <- gage(exprs = foldchanges, gsets = kegg.sets.mm, same.dir = TRUE)
+
+# Print the top 5 up-regulated pathways 
+cat("\n--- Top 5 Up-Regulated Pathways in Aged TBI ---\n")
+print(head(keggres$greater, 5))
+
+# Print the top 5 down-regulated pathways 
+cat("\n--- Top 5 Down-Regulated Pathways in Aged TBI ---\n")
+print(head(keggres$less, 5))
+
+# 6. Generate the Pathway Image
+# Grab the ID of the absolute most significantly down-regulated pathway
+top_pathway <- rownames(keggres$less)[1]
+top_pathway_id <- substr(top_pathway, 1, 8) # Extracts just the "mmuXXXXX" ID
+
+cat(paste("\nDrawing Pathview for top pathway:", top_pathway_id, "\n"))
+
+pathview(gene.data = foldchanges, 
+         pathway.id = top_pathway_id, 
+        species = "mmu", 
+         limit = list(gene = max(abs(foldchanges)), cpd = 1))
+```
