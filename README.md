@@ -1,4 +1,3 @@
-<img width="714" height="595" alt="PCA" src="https://github.com/user-attachments/assets/f341f98c-75ea-456b-a850-f4c798ccc204" />
 # RNAseq-Analysis-Aged-TBI
 
 ### Project Overview
