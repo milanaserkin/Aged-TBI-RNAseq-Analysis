@@ -1,3 +1,4 @@
+<img width="714" height="595" alt="PCA" src="https://github.com/user-attachments/assets/f341f98c-75ea-456b-a850-f4c798ccc204" />
 # RNAseq-Analysis-Aged-TBI
 
 ### Project Overview
@@ -15,6 +16,10 @@ This repository contains the workflow and scripts used to perform differential e
 
 ### Results
 Starting with raw bulk RNA-seq count data across four experimental groups (Young Sham, Young TBI, Aged Sham, Aged TBI), the data was normalized and analyzed for differential expression. 
+
+<img width="714" height="595" alt="PCA" src="https://github.com/user-attachments/assets/cf090d6e-0144-452e-a213-6d4765ec01f9" />
+<img width="904" height="862" alt="mmu04512 pathview" src="https://github.com/user-attachments/assets/7c8f20e6-90bb-4281-887c-426f2eee348d" />
+
 
 * **Variance & Clustering:** Principal Component Analysis (PCA) successfully clustered the samples by age and injury status, matching the variance observed in the published literature.
 * **Pathway Analysis:** GAGE pathway analysis revealed that the **Extracellular Matrix (ECM) receptor interaction pathway (KEGG ID: mmu04512)** is significantly down-regulated in aged TBI mice (p = 0.016).
